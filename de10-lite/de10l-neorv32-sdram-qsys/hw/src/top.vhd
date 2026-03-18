@@ -213,7 +213,8 @@ architecture syn of top is
          sdram_ras_n       : out   std_logic;                                        -- ras_n
          sdram_we_n        : out   std_logic;
 
-         avm_address_i     : in  std_logic_vector(27 downto 0) := (others => 'X');   -- address_i
+         avm_address_i     : in  std_logic_vector(31 downto 0) := (others => 'X');   -- address_i
+         avm_cs_i      : in std_logic;
          avm_read_i        : in  std_logic                     := 'X';               -- read_i
          avm_waitrequest_o : out std_logic;                                          -- waitrequest_o
          avm_readdata_o    : out std_logic_vector(31 downto 0);                      -- readdata_o
@@ -703,13 +704,14 @@ begin
          sdram_ras_n       => SDRAM_RAS_N,
          sdram_we_n        => SDRAM_WE_N,
 
-         avm_address_i     => address,
+         avm_address_i     => "0000" & address,
          avm_read_i        => read,
          avm_waitrequest_o => waitrequest,
          avm_readdata_o    => readdata,
          avm_write_i       => write,
          avm_writedata_i   => writedata,
-         avm_byteenable_i  => byteenable
+         avm_byteenable_i  => byteenable,
+         avm_cs_i          => '1'
       );
 
    SDRAM_BA_1 <= sdram_ba(1);

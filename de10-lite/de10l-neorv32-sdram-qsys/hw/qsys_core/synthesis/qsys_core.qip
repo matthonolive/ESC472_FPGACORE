@@ -2,7 +2,7 @@ set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_TOOL_NAM
 set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_TOOL_VERSION "20.1"
 set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_TOOL_ENV "Qsys"
 set_global_assignment -library "qsys_core" -name SOPCINFO_FILE [file join $::quartus(qip_path) "../../qsys_core.sopcinfo"]
-set_global_assignment -entity "qsys_core" -library "qsys_core" -name SLD_INFO "QSYS_NAME qsys_core HAS_SOPCINFO 1 GENERATION_ID 1759592692"
+set_global_assignment -entity "qsys_core" -library "qsys_core" -name SLD_INFO "QSYS_NAME qsys_core HAS_SOPCINFO 1 GENERATION_ID 1773862607"
 set_global_assignment -library "qsys_core" -name MISC_FILE [file join $::quartus(qip_path) "../qsys_core.cmp"]
 set_global_assignment -library "qsys_core" -name SLD_FILE [file join $::quartus(qip_path) "qsys_core.debuginfo"]
 set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_TARGETED_DEVICE_FAMILY "MAX 10"
@@ -15,7 +15,7 @@ set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_COMPONEN
 set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_COMPONENT_REPORT_HIERARCHY "On"
 set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_COMPONENT_INTERNAL "Off"
 set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_COMPONENT_VERSION "MS4w"
-set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_COMPONENT_PARAMETER "QVVUT19HRU5FUkFUSU9OX0lE::MTc1OTU5MjY5Mg==::QXV0byBHRU5FUkFUSU9OX0lE"
+set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_COMPONENT_PARAMETER "QVVUT19HRU5FUkFUSU9OX0lE::MTc3Mzg2MjYwNw==::QXV0byBHRU5FUkFUSU9OX0lE"
 set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_COMPONENT_PARAMETER "QVVUT19ERVZJQ0VfRkFNSUxZ::TUFYIDEw::QXV0byBERVZJQ0VfRkFNSUxZ"
 set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_COMPONENT_PARAMETER "QVVUT19ERVZJQ0U=::MTBNNTBEQUY0ODRDN0c=::QXV0byBERVZJQ0U="
 set_global_assignment -entity "qsys_core" -library "qsys_core" -name IP_COMPONENT_PARAMETER "QVVUT19ERVZJQ0VfU1BFRURHUkFERQ==::Nw==::QXV0byBERVZJQ0VfU1BFRURHUkFERQ=="
@@ -571,7 +571,7 @@ set_global_assignment -entity "qsys_core_sdram" -library "qsys_core" -name IP_CO
 set_global_assignment -entity "qsys_core_sdram" -library "qsys_core" -name IP_COMPONENT_PARAMETER "YWRkcmVzc1dpZHRo::MjU=::YWRkcmVzc1dpZHRo"
 set_global_assignment -entity "qsys_core_sdram" -library "qsys_core" -name IP_COMPONENT_PARAMETER "YmFua1dpZHRo::Mg==::YmFua1dpZHRo"
 
-set_global_assignment -library "qsys_core" -name VERILOG_FILE [file join $::quartus(qip_path) "qsys_core.v"]
+set_global_assignment -library "qsys_core" -name VHDL_FILE [file join $::quartus(qip_path) "qsys_core.vhd"]
 set_global_assignment -library "qsys_core" -name VERILOG_FILE [file join $::quartus(qip_path) "submodules/qsys_core_mm_interconnect_0.v"]
 set_global_assignment -library "qsys_core" -name VERILOG_FILE [file join $::quartus(qip_path) "submodules/qsys_core_mm_interconnect_0_avalon_st_adapter.v"]
 set_global_assignment -library "qsys_core" -name SYSTEMVERILOG_FILE [file join $::quartus(qip_path) "submodules/qsys_core_mm_interconnect_0_avalon_st_adapter_error_adapter_0.sv"]
