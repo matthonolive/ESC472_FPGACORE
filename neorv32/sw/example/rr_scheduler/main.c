@@ -18,7 +18,10 @@ static void print_int(int v) {
     int  i = 0;
     if (v == 0) { print("0"); return; }
     while (v > 0) { buf[i++] = '0' + (v % 10); v /= 10; }
-    while (i--) { char c = buf[i]; *UART0 = c; }
+    while (i--) {
+        char str[2] = { buf[i], '\0' };
+        print(str);
+    }
 }
 
 /* ── Task 1: cooperative yielding ──────────────────────────── */
