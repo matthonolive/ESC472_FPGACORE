@@ -4,7 +4,7 @@
 #include <stdint.h>
 
 #define MAX_TASKS   4
-#define STACK_SIZE  512     /* words (2 KB per task stack) */
+#define STACK_SIZE  1024     /* words (2 KB per task stack) */
 
 typedef struct {
     uint32_t *sp;           /* saved stack pointer (cooperative frame) */
