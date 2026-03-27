@@ -55,40 +55,58 @@ static void send_float(float v) {
 #define SYNC_RX      0xAA
 #define SYNC_TX      0x55
 
-static float rx_ffe[RX_FFE_LEN];
-static float dfe[N_DFE];
+/* ── Multi-task support ────────────────────────────────────── */
+#define MAX_TASKS    4
+
+/* Per-task tap storage (global so it doesn't eat stack) */
+static float rx_ffe[MAX_TASKS][RX_FFE_LEN];
+static float dfe[MAX_TASKS][N_DFE];
+
+/* Monotonic counter — each task1 instance grabs a unique ID */
+static volatile int task_id_counter = 0;
 
 /* ── Task 1: equalizer over UART ───────────────────────────── */
 void task1(void) {
+    int my_id = task_id_counter++;
+
+    /* Initialise this task's taps */
     for (int k = 0; k < RX_FFE_LEN; k++)
-        rx_ffe[k] = 0.0f;
-    rx_ffe[RX_FFE_PRE] = 1.0f;
+        rx_ffe[my_id][k] = 0.0f;
+    rx_ffe[my_id][RX_FFE_PRE] = 1.0f;
     for (int k = 0; k < N_DFE; k++)
-        dfe[k] = 0.0f;
+        dfe[my_id][k] = 0.0f;
 
     float rx_buf[RX_FFE_LEN];
     float d_hist[N_DFE];
 
     while (1) {
+        /* ── Wait for sync byte ──────────────────────────────── */
         uint8_t sync;
         do { sync = uart_getc(); } while (sync != SYNC_RX);
 
+        /* ── Read (and discard) the task-ID the laptop sent ──── */
+        uart_getc();
+
+        /* ── Read payload ────────────────────────────────────── */
         float error = recv_float();
         for (int k = 0; k < RX_FFE_LEN; k++)
             rx_buf[k] = recv_float();
         for (int k = 0; k < N_DFE; k++)
             d_hist[k] = recv_float();
 
+        /* ── LMS update ──────────────────────────────────────── */
         for (int k = 0; k < RX_FFE_LEN; k++)
-            rx_ffe[k] += MU_FFE * error * rx_buf[k];
+            rx_ffe[my_id][k] += MU_FFE * error * rx_buf[k];
         for (int k = 0; k < N_DFE; k++)
-            dfe[k] -= MU_DFE * error * d_hist[k];
+            dfe[my_id][k] -= MU_DFE * error * d_hist[k];
 
+        /* ── Send response: SYNC + task-ID + taps ────────────── */
         uart_putc(SYNC_TX);
+        uart_putc((uint8_t)my_id);
         for (int k = 0; k < RX_FFE_LEN; k++)
-            send_float(rx_ffe[k]);
+            send_float(rx_ffe[my_id][k]);
         for (int k = 0; k < N_DFE; k++)
-            send_float(dfe[k]);
+            send_float(dfe[my_id][k]);
 
         yield();
     }
@@ -115,7 +133,7 @@ int main(void) {
 
     scheduler_init();
     create_task(task1);
-    //create_task(task2);
+    create_task(task1); // second equalizer task
 
     schedule();
     while (1);
