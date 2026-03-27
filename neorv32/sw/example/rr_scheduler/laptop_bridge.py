@@ -392,12 +392,6 @@ def run_bridge(port, baud, channel_file, max_iters=None, verbose=True,
         # Decision
         d_hat = 1.0 if y >= 0.0 else -1.0
  
-        # Update decision history BEFORE sending to FPGA
-        # (so the FPGA gets the current d_hist, not the stale one)
-        if N_DFE > 1:
-            d_hist[1:] = d_hist[:-1]
-        d_hist[0] = d_hat
- 
         # Training target
         sym_idx = pt // OSF
         desired = bits[sym_idx] if sym_idx < N_BIT else d_hat
@@ -436,6 +430,12 @@ def run_bridge(port, baud, channel_file, max_iters=None, verbose=True,
         if debug:
             print(f"  Got taps: FFE_main={rx_ffe[RX_FFE_PRE]:+.6f}  "
                   f"DFE[0]={dfe_taps[0]:+.6f}")
+ 
+        # Update decision history AFTER LMS update
+        # (must use the OLD d_hist for the gradient, matching sim mode)
+        if N_DFE > 1:
+            d_hist[1:] = d_hist[:-1]
+        d_hist[0] = d_hat
  
         # ── Periodic reporting ────────────────────────────────
         if verbose and n_symbols % report_interval == 0:
