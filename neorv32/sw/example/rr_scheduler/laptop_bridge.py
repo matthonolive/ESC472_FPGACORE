@@ -26,8 +26,8 @@ import sys
 import numpy as np
  
 # ── Equalizer dimensions (must match FPGA main.c) ─────────────────────
-RX_FFE_PRE  = 3
-RX_FFE_POST = 10
+RX_FFE_PRE  = 10
+RX_FFE_POST = 20
 RX_FFE_LEN  = RX_FFE_PRE + 1 + RX_FFE_POST   # 14
 N_DFE       = 1
  
@@ -37,15 +37,15 @@ SYNC_RX = 0x55   # FPGA → laptop
  
 # ── SerDes simulation parameters ──────────────────────────────────────
 OSF         = 16
-N_BIT       = 2048
+N_BIT       = 512
 ADC_BITS    = 5
-TX_FFE_PRE  = 4
+TX_FFE_PRE  = 0
 TX_FFE_POST = 0
 TX_FFE_LEN  = TX_FFE_PRE + 1 + TX_FFE_POST
  
 # ── LMS parameters (for --sim mode) ──────────────────────────────────
 MU_FFE  = 0.01
-MU_DFE  = 0.005
+MU_DFE  = 0.00
  
  
 # ═══════════════════════════════════════════════════════════════════════
