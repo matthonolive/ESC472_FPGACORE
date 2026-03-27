@@ -26,11 +26,11 @@ import sys
 import numpy as np
  
 # ── Equalizer dimensions (must match FPGA main.c) ─────────────────────
-RX_FFE_PRE  = 10
-RX_FFE_POST = 20
+RX_FFE_PRE  = 3
+RX_FFE_POST = 10
 RX_FFE_LEN  = RX_FFE_PRE + 1 + RX_FFE_POST   # 14
 N_DFE       = 1
- 
+
 # ── Sync bytes ─────────────────────────────────────────────────────────
 SYNC_TX = 0xAA   # laptop → FPGA
 SYNC_RX = 0x55   # FPGA → laptop

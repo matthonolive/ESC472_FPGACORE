@@ -51,7 +51,7 @@ static void send_float(float v) {
 #define RX_FFE_LEN   (RX_FFE_PRE + 1 + RX_FFE_POST)
 #define N_DFE        1
 #define MU_FFE       0.01f
-#define MU_DFE       0.005f
+#define MU_DFE       0.00f
 #define SYNC_RX      0xAA
 #define SYNC_TX      0x55
 
