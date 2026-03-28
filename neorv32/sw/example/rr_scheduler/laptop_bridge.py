@@ -3,20 +3,16 @@
 laptop_bridge.py  —  Laptop-side channel simulation + UART bridge to FPGA equalizer
 
 Usage:
-    # Normal FPGA mode (2 tasks by default)
-    python laptop_bridge.py --port COM3 --channel channel_taps.txt --eye
+    # Normal FPGA mode (10 lanes)
+    python laptop_bridge.py --port COM5 --channel channel_taps.txt --eye
 
-    # Specify number of FPGA equalizer tasks
-    python laptop_bridge.py --port COM3 --channel channel_taps.txt --tasks 2
+    # Fewer lanes for testing
+    python laptop_bridge.py --port COM5 --channel channel_taps.txt --tasks 3
 
-    # Debug mode — hex-dump every byte on the wire
-    python laptop_bridge.py --port COM3 --channel channel_taps.txt --debug
-
-    # Listen mode — just print raw bytes from FPGA (no sending)
-    python laptop_bridge.py --port COM3 --listen
-
-    # Sim mode — software-only LMS, no FPGA needed (proves algorithm works)
+    # Sim mode — software-only LMS, no FPGA needed
     python laptop_bridge.py --channel channel_taps.txt --sim --eye
+
+  While running, press 0-9 to soft-reset the corresponding lane.
 
 Dependencies:
     pip install pyserial numpy matplotlib
@@ -26,6 +22,7 @@ import argparse
 import struct
 import time
 import sys
+import threading
 import numpy as np
 
 # ── Equalizer dimensions (must match FPGA main.c) ─────────────────────
@@ -38,6 +35,14 @@ N_DFE       = 1
 SYNC_TX = 0xAA   # laptop → FPGA
 SYNC_RX = 0x55   # FPGA → laptop
 
+# ── Command byte values (laptop → FPGA) ───────────────────────────────
+CMD_NORMAL = 0x00
+CMD_RESET  = 0x01
+
+# ── Status byte values (FPGA → laptop) ────────────────────────────────
+STATUS_OK    = 0x00
+STATUS_RESET = 0x01
+
 # ── SerDes simulation parameters ──────────────────────────────────────
 OSF         = 16
 N_BIT       = 256
@@ -49,6 +54,58 @@ TX_FFE_LEN  = TX_FFE_PRE + 1 + TX_FFE_POST
 # ── LMS parameters (for --sim mode) ──────────────────────────────────
 MU_FFE  = 0.01
 MU_DFE  = 0.00
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Keyboard listener  (press 0-9 to reset a lane)
+# ═══════════════════════════════════════════════════════════════════════
+
+reset_pending = {}   # lane_id → True  (consumed by main loop)
+_kb_stop = threading.Event()
+
+
+def _keyboard_listener():
+    """Background thread: read single keypresses, set reset flags."""
+    try:
+        # ── Windows ──
+        import msvcrt
+        while not _kb_stop.is_set():
+            if msvcrt.kbhit():
+                ch = msvcrt.getch().decode(errors='ignore')
+                if ch in '0123456789':
+                    lane = int(ch)
+                    reset_pending[lane] = True
+                    print(f"\n>>> Reset queued for lane {lane}  "
+                          f"(will take effect on next packet)\n")
+            _kb_stop.wait(0.05)
+    except ImportError:
+        # ── Unix / Linux / macOS ──
+        import tty, termios, select
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            while not _kb_stop.is_set():
+                rlist, _, _ = select.select([sys.stdin], [], [], 0.05)
+                if rlist:
+                    ch = sys.stdin.read(1)
+                    if ch in '0123456789':
+                        lane = int(ch)
+                        reset_pending[lane] = True
+                        print(f"\n>>> Reset queued for lane {lane}  "
+                              f"(will take effect on next packet)\n")
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def start_keyboard_listener():
+    t = threading.Thread(target=_keyboard_listener, daemon=True)
+    t.start()
+    return t
+
+
+def stop_keyboard_listener():
+    _kb_stop.set()
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -111,8 +168,6 @@ def simple_cdr(signal, osf, n_cdr=1000):
 
 
 def build_signal_chain(channel_file):
-    """Build the full transmit → channel → ADC signal chain. Returns
-    (post_adc, bits, sample_phase)."""
     h_fir = load_channel(channel_file)
     print(f"Loaded channel: {len(h_fir)} taps from {channel_file}")
 
@@ -133,13 +188,12 @@ def build_signal_chain(channel_file):
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Packet I/O  (updated: task-ID byte after sync)
+# Packet I/O  (with command byte)
 # ═══════════════════════════════════════════════════════════════════════
 
-def build_error_packet(task_id, error, rx_buf, d_hist):
-    """Build the binary packet:
-       SYNC_TX | task_id(u8) | error(f32) | rx_buf(f32×14) | d_hist(f32×1)"""
-    pkt = bytearray([SYNC_TX, task_id & 0xFF])
+def build_error_packet(task_id, cmd, error, rx_buf, d_hist):
+    """Build: SYNC_TX | task_id(u8) | cmd(u8) | error(f32) | rx_buf | d_hist"""
+    pkt = bytearray([SYNC_TX, task_id & 0xFF, cmd & 0xFF])
     pkt += struct.pack('<f', error)
     for v in rx_buf:
         pkt += struct.pack('<f', v)
@@ -148,20 +202,21 @@ def build_error_packet(task_id, error, rx_buf, d_hist):
     return bytes(pkt)
 
 
-def send_error_packet(ser, task_id, error, rx_buf, d_hist, debug=False):
-    pkt = build_error_packet(task_id, error, rx_buf, d_hist)
+def send_error_packet(ser, task_id, cmd, error, rx_buf, d_hist, debug=False):
+    pkt = build_error_packet(task_id, cmd, error, rx_buf, d_hist)
     if debug:
-        print(f"  TX [task {task_id}] ({len(pkt)} bytes): {pkt.hex(' ')}")
+        cmd_str = "RESET" if cmd == CMD_RESET else "NORM"
+        print(f"  TX [lane {task_id} {cmd_str}] "
+              f"({len(pkt)} bytes): {pkt.hex(' ')}")
     ser.write(pkt)
     ser.flush()
 
 
 def recv_tap_packet(ser, debug=False):
-    """Receive taps from FPGA.
-    Packet: SYNC_RX | task_id(u8) | floats…
-    Returns (task_id, rx_ffe, dfe)."""
+    """Receive: SYNC_RX | task_id(u8) | status(u8) | floats…
+    Returns (task_id, status, rx_ffe, dfe)."""
 
-    n_floats = RX_FFE_LEN + N_DFE        # 15 floats = 60 bytes
+    n_floats = RX_FFE_LEN + N_DFE
     payload_len = n_floats * 4
 
     # ── Scan for sync byte ────────────────────────────────────
@@ -188,8 +243,16 @@ def recv_tap_packet(ser, debug=False):
     if len(id_byte) == 0:
         raise TimeoutError("Timed out reading task-ID byte")
     task_id = id_byte[0]
+
+    # ── Read status byte ──────────────────────────────────────
+    st_byte = ser.read(1)
+    if len(st_byte) == 0:
+        raise TimeoutError("Timed out reading status byte")
+    status = st_byte[0]
+
     if debug:
-        print(f"  RX task_id: {task_id}")
+        status_str = "RESET" if status == STATUS_RESET else "OK"
+        print(f"  RX task_id: {task_id}  status: {status_str}")
 
     # ── Read float payload ────────────────────────────────────
     raw = ser.read(payload_len)
@@ -202,15 +265,14 @@ def recv_tap_packet(ser, debug=False):
     values = struct.unpack(f'<{n_floats}f', raw)
     rx_ffe = np.array(values[:RX_FFE_LEN])
     dfe    = np.array(values[RX_FFE_LEN:])
-    return task_id, rx_ffe, dfe
+    return task_id, status, rx_ffe, dfe
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# Listen mode — just show what the FPGA sends
+# Listen mode
 # ═══════════════════════════════════════════════════════════════════════
 
 def run_listen(port, baud, duration=10):
-    """Listen to raw bytes from the FPGA for `duration` seconds."""
     import serial
     ser = serial.Serial(port, baud, timeout=0.5)
     print(f"Listening on {port} @ {baud} for {duration}s  (Ctrl-C to stop)")
@@ -244,14 +306,9 @@ def run_listen(port, baud, duration=10):
 # ═══════════════════════════════════════════════════════════════════════
 
 def run_sim(channel_file, max_iters=None, verbose=True, show_eye=False):
-    """Pure-software LMS equalizer — proves the algorithm converges without
-    needing the FPGA at all."""
-
     post_adc, bits, sample_phase = build_signal_chain(channel_file)
-
     print("Running software-only LMS (--sim mode)")
 
-    # ── State ─────────────────────────────────────────────────
     rx_buf   = np.zeros(RX_FFE_LEN)
     d_hist   = np.zeros(N_DFE)
     rx_ffe   = np.zeros(RX_FFE_LEN)
@@ -262,7 +319,6 @@ def run_sim(channel_file, max_iters=None, verbose=True, show_eye=False):
     mse_acc = 0.0
     report_interval = 100
     mse_history = []
-
     eq_output = np.copy(post_adc).astype(float)
 
     total_samples = len(post_adc)
@@ -271,39 +327,23 @@ def run_sim(channel_file, max_iters=None, verbose=True, show_eye=False):
     for pt in range(start_idx, total_samples, 1):
         if pt + sample_phase >= total_samples:
             break
-
         sample = post_adc[pt + sample_phase]
-
-        # Shift sample into buffer
         rx_buf[1:] = rx_buf[:-1]
         rx_buf[0] = sample
-
-        # Equalizer output
         y_ffe = np.dot(rx_ffe, rx_buf)
         y = y_ffe - np.dot(dfe_taps, d_hist)
         eq_output[pt + sample_phase] = y
-
-        # Decision
         d_hat = 1.0 if y >= 0.0 else -1.0
-
-        # Training target
         sym_idx = pt // 1
         desired = bits[sym_idx] if sym_idx < N_BIT else d_hat
-
         error = desired - y
         mse_acc += error * error
         n_symbols += 1
-
-        # ── LMS update (what the FPGA would do) ──────────────
         rx_ffe  += MU_FFE * error * rx_buf
         dfe_taps -= MU_DFE * error * d_hist
-
-        # Update decision history AFTER using it for LMS
         if N_DFE > 1:
             d_hist[1:] = d_hist[:-1]
         d_hist[0] = d_hat
-
-        # Reporting
         if verbose and n_symbols % report_interval == 0:
             mse = mse_acc / report_interval
             mse_history.append(mse)
@@ -311,11 +351,9 @@ def run_sim(channel_file, max_iters=None, verbose=True, show_eye=False):
             print(f"[{n_symbols:5d}] MSE={mse:.6f}  "
                   f"FFE_main={rx_ffe[RX_FFE_PRE]:+.4f}  "
                   f"DFE[0]={dfe_taps[0]:+.4f}")
-
         if max_iters and n_symbols >= max_iters:
             break
 
-    # ── Final report ──────────────────────────────────────────
     print(f"\nDone: {n_symbols} symbols processed (software LMS)")
     print(f"Final RX FFE taps: {rx_ffe}")
     print(f"Final DFE taps:    {dfe_taps}")
@@ -324,18 +362,14 @@ def run_sim(channel_file, max_iters=None, verbose=True, show_eye=False):
         plot_eye_diagrams(post_adc, eq_output, sample_phase, OSF, bits)
         if mse_history:
             plot_convergence(mse_history)
-    elif show_eye:
-        print("Not enough symbols for eye diagram (need >100)")
-
     return rx_ffe, dfe_taps
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# FPGA bridge mode  (updated for multiple tasks)
+# FPGA bridge mode  (keyboard-triggered resets)
 # ═══════════════════════════════════════════════════════════════════════
 
 def drain_startup(ser, wait=1.0):
-    """Drain any startup text the FPGA prints on boot."""
     ser.reset_input_buffer()
     time.sleep(wait)
     startup_text = b""
@@ -348,31 +382,45 @@ def drain_startup(ser, wait=1.0):
         print("(no startup text from FPGA)")
 
 
-def run_bridge(port, baud, channel_file, n_tasks=2, max_iters=None,
+def reset_lane_state(rx_buf, d_hist, rx_ffe, dfe_taps, eq_output,
+                     mse_acc, n_symbols, tid, post_adc):
+    """Clear laptop-side state for a lane that was just reset."""
+    rx_buf[tid][:] = 0.0
+    d_hist[tid][:] = 0.0
+    rx_ffe[tid][:] = 0.0
+    rx_ffe[tid][RX_FFE_PRE] = 1.0
+    dfe_taps[tid][:] = 0.0
+    eq_output[tid] = np.copy(post_adc).astype(float)
+    mse_acc[tid] = 0.0
+    n_symbols[tid] = 0
+
+
+def run_bridge(port, baud, channel_file, n_tasks=10, max_iters=None,
                verbose=True, show_eye=False, debug=False):
-    """Main loop: simulate channel on laptop, do LMS on FPGA.
-    Sends one packet per FPGA task in round-robin order."""
     import serial
 
     post_adc, bits, sample_phase = build_signal_chain(channel_file)
 
-    # ── Open serial port ──────────────────────────────────────
     print(f"Opening {port} @ {baud}...")
     ser = serial.Serial(port, baud, timeout=2.0)
     drain_startup(ser, wait=1.5)
     print(f"Serial open: {port} @ {baud}")
 
-    # ── Compute packet sizes for sanity check ─────────────────
-    tx_pkt_len = 1 + 1 + (1 + RX_FFE_LEN + N_DFE) * 4  # SYNC + ID + floats
-    rx_pkt_len = 1 + 1 + (RX_FFE_LEN + N_DFE) * 4       # SYNC + ID + floats
-    print(f"Packet sizes — TX: {tx_pkt_len} bytes, expected RX: {rx_pkt_len} bytes")
-    print(f"Number of FPGA equalizer tasks: {n_tasks}")
+    tx_pkt_len = 1 + 1 + 1 + (1 + RX_FFE_LEN + N_DFE) * 4  # SYNC+ID+CMD+floats
+    rx_pkt_len = 1 + 1 + 1 + (RX_FFE_LEN + N_DFE) * 4        # SYNC+ID+STATUS+floats
+    print(f"Packet sizes — TX: {tx_pkt_len} bytes, "
+          f"expected RX: {rx_pkt_len} bytes")
+    print(f"Number of FPGA lane tasks: {n_tasks}")
     print(f"Starting equalization loop...")
+    print(f"  >>> Press 0-9 to soft-reset a lane <<<")
     if debug:
         print("(debug mode: showing raw bytes)")
     print()
 
-    # ── Per-task state ────────────────────────────────────────
+    # ── Start keyboard listener ──────────────────────────────
+    start_keyboard_listener()
+
+    # ── Per-lane state ────────────────────────────────────────
     rx_buf   = [np.zeros(RX_FFE_LEN) for _ in range(n_tasks)]
     d_hist   = [np.zeros(N_DFE)      for _ in range(n_tasks)]
     rx_ffe   = [np.zeros(RX_FFE_LEN) for _ in range(n_tasks)]
@@ -383,22 +431,23 @@ def run_bridge(port, baud, channel_file, n_tasks=2, max_iters=None,
     n_symbols  = [0] * n_tasks
     mse_acc    = [0.0] * n_tasks
     report_interval = 100
-    mse_history = [[] for _ in range(n_tasks)]
+    mse_history    = [[] for _ in range(n_tasks)]
+    reset_counts   = [0] * n_tasks
 
     eq_output = [np.copy(post_adc).astype(float) for _ in range(n_tasks)]
 
     total_samples = len(post_adc)
     start_idx = (TX_FFE_PRE + 1) * OSF
 
-    for pt in range(start_idx, total_samples, 1):
+    try:
+      for pt in range(start_idx, total_samples, 1):
         if pt + sample_phase >= total_samples:
             break
 
         sample = post_adc[pt + sample_phase]
 
-        # ── Round-robin: send to each task, receive from each ─
         for tid in range(n_tasks):
-            # Shift sample into this task's FFE buffer
+            # Shift sample into this lane's FFE buffer
             rx_buf[tid][1:] = rx_buf[tid][:-1]
             rx_buf[tid][0] = sample
 
@@ -407,10 +456,8 @@ def run_bridge(port, baud, channel_file, n_tasks=2, max_iters=None,
             y = y_ffe - np.dot(dfe_taps[tid], d_hist[tid])
             eq_output[tid][pt + sample_phase] = y
 
-            # Decision
             d_hat = 1.0 if y >= 0.0 else -1.0
 
-            # Training target
             sym_idx = pt // 1
             desired = bits[sym_idx] if sym_idx < N_BIT else d_hat
 
@@ -418,44 +465,56 @@ def run_bridge(port, baud, channel_file, n_tasks=2, max_iters=None,
             mse_acc[tid] += error * error
             n_symbols[tid] += 1
 
-            # ── Send to FPGA ──────────────────────────────────
-            if debug:
-                print(f"--- Task {tid}  Symbol {n_symbols[tid]} ---")
-                print(f"  error={error:+.4f}  sample={sample:+.4f}  "
-                      f"desired={desired:+.1f}  y={y:+.4f}")
+            # ── Check if user pressed this lane's key ─────────
+            cmd = CMD_NORMAL
+            if reset_pending.pop(tid, False):
+                cmd = CMD_RESET
 
-            send_error_packet(ser, tid, float(error),
+            if debug:
+                print(f"--- Lane {tid}  Symbol {n_symbols[tid]} ---")
+
+            # ── Send to FPGA (with cmd byte) ──────────────────
+            send_error_packet(ser, tid, cmd, float(error),
                               rx_buf[tid].tolist(), d_hist[tid].tolist(),
                               debug=debug)
 
             # ── Receive updated taps from FPGA ────────────────
             try:
-                resp_id, new_ffe, new_dfe = recv_tap_packet(ser, debug=debug)
+                resp_id, status, new_ffe, new_dfe = \
+                    recv_tap_packet(ser, debug=debug)
             except TimeoutError as e:
-                print(f"\nTimeout at task {tid}, symbol {n_symbols[tid]}: {e}")
-                leftover = ser.read(ser.in_waiting) if ser.in_waiting else b""
+                print(f"\nTimeout at lane {tid}, "
+                      f"symbol {n_symbols[tid]}: {e}")
+                leftover = ser.read(ser.in_waiting) if ser.in_waiting \
+                    else b""
                 if leftover:
-                    print(f"  Leftover in buffer ({len(leftover)} bytes): "
+                    print(f"  Leftover ({len(leftover)} bytes): "
                           f"{leftover[:40].hex(' ')}")
-                    try:
-                        print(f"  As text: "
-                              f"{leftover.decode('ascii', errors='replace')}")
-                    except Exception:
-                        pass
                 else:
-                    print("  (serial buffer is empty — FPGA sent nothing back)")
+                    print("  (serial buffer empty)")
                 ser.close()
+                stop_keyboard_listener()
                 return
+
+            # ── Handle reset confirmation from FPGA ───────────
+            if status == STATUS_RESET:
+                reset_counts[resp_id] += 1
+                print(f"\n*** LANE {resp_id} RESET "
+                      f"(reset #{reset_counts[resp_id]}) "
+                      f"at symbol {n_symbols[resp_id]} ***\n")
+                reset_lane_state(rx_buf, d_hist, rx_ffe, dfe_taps,
+                                 eq_output, mse_acc, n_symbols,
+                                 resp_id, post_adc)
 
             rx_ffe[resp_id]   = new_ffe
             dfe_taps[resp_id] = new_dfe
 
             if debug:
-                print(f"  Got taps [task {resp_id}]: "
+                print(f"  Got taps [lane {resp_id}]: "
                       f"FFE_main={new_ffe[RX_FFE_PRE]:+.6f}  "
                       f"DFE[0]={new_dfe[0]:+.6f}")
 
-            # Update decision history AFTER LMS update
+            # Update decision history
             if N_DFE > 1:
                 d_hist[tid][1:] = d_hist[tid][:-1]
             d_hist[tid][0] = d_hat
@@ -466,26 +525,31 @@ def run_bridge(port, baud, channel_file, n_tasks=2, max_iters=None,
                 mse_history[tid].append(mse)
                 mse_acc[tid] = 0.0
                 main_tap = rx_ffe[tid][RX_FFE_PRE]
-                print(f"[task {tid}  {n_symbols[tid]:5d}] MSE={mse:.6f}  "
+                print(f"[lane {tid}  {n_symbols[tid]:5d}] "
+                      f"MSE={mse:.6f}  "
                       f"FFE_main={main_tap:+.4f}  "
                       f"DFE[0]={dfe_taps[tid][0]:+.4f}")
 
-        # ── Check iteration limit (based on task 0) ──────────
         if max_iters and n_symbols[0] >= max_iters:
             break
 
+    except KeyboardInterrupt:
+        print("\n\nStopped by Ctrl-C")
+    finally:
+        stop_keyboard_listener()
+
     # ── Final report ──────────────────────────────────────────
     for tid in range(n_tasks):
-        print(f"\nTask {tid}: {n_symbols[tid]} symbols processed")
+        print(f"\nLane {tid}: {n_symbols[tid]} symbols processed  "
+              f"({reset_counts[tid]} resets)")
         print(f"  Final RX FFE taps: {rx_ffe[tid]}")
         print(f"  Final DFE taps:    {dfe_taps[tid]}")
 
     ser.close()
 
-    # Eye diagrams — show task 0 by default
     if show_eye and n_symbols[0] > 100:
         plot_eye_diagrams(post_adc, eq_output[0], sample_phase, OSF, bits,
-                          label="Task 0")
+                          label="Lane 0")
         if any(len(h) > 0 for h in mse_history):
             plot_convergence_multi(mse_history)
     elif show_eye:
@@ -507,10 +571,8 @@ def plot_eye_diagrams(post_adc, eq_output, sample_phase, osf, bits,
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     t_ui = np.linspace(-1, 1, 2 * osf)
-
     title_suffix = f"  ({label})" if label else ""
 
-    # Before equalization
     ax = axes[0]
     for i in range(start_sym, start_sym + n_traces):
         center = i * osf + sample_phase
@@ -528,7 +590,6 @@ def plot_eye_diagrams(post_adc, eq_output, sample_phase, osf, bits,
     ax.axvline(0, color='red', linestyle='--', alpha=0.5, label='Sample point')
     ax.legend()
 
-    # After equalization
     ax = axes[1]
     for i in range(start_sym, start_sym + min(n_traces, len(eq_output))):
         center = i * osf + sample_phase
@@ -553,20 +614,21 @@ def plot_eye_diagrams(post_adc, eq_output, sample_phase, osf, bits,
 
 
 def plot_convergence_multi(mse_histories):
-    """Plot convergence curves for all tasks on a single figure."""
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red']
+    fig, ax = plt.subplots(figsize=(10, 5))
+    colors = ['tab:blue', 'tab:orange', 'tab:green', 'tab:red',
+              'tab:purple', 'tab:brown', 'tab:pink', 'tab:gray',
+              'tab:olive', 'tab:cyan']
     for tid, hist in enumerate(mse_histories):
         if hist:
             ax.semilogy(hist, linewidth=1.5,
                         color=colors[tid % len(colors)],
-                        label=f'Task {tid}')
-    ax.set_title('LMS Convergence')
+                        label=f'Lane {tid}')
+    ax.set_title('LMS Convergence — All Lanes')
     ax.set_xlabel('Symbol (×100)')
     ax.set_ylabel('MSE')
-    ax.legend()
+    ax.legend(ncol=2, fontsize='small')
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
     plt.savefig('convergence.png', dpi=150)
@@ -575,7 +637,6 @@ def plot_convergence_multi(mse_histories):
 
 
 def plot_convergence(mse_history):
-    """Single-task convergence (kept for --sim mode)."""
     plot_convergence_multi([mse_history])
 
 
@@ -592,8 +653,8 @@ if __name__ == '__main__':
                         help='Baud rate (default: 19200)')
     parser.add_argument('--channel',
                         help='Path to channel taps file')
-    parser.add_argument('--tasks', type=int, default=2,
-                        help='Number of equalizer tasks on FPGA (default: 2)')
+    parser.add_argument('--tasks', type=int, default=10,
+                        help='Number of lane tasks on FPGA (default: 10)')
     parser.add_argument('--max-iters', type=int, default=None,
                         help='Max symbols to process')
     parser.add_argument('--quiet', action='store_true',
@@ -605,7 +666,7 @@ if __name__ == '__main__':
     parser.add_argument('--listen', action='store_true',
                         help='Just listen to FPGA output (no sending)')
     parser.add_argument('--listen-time', type=int, default=10,
-                        help='Seconds to listen in --listen mode (default: 10)')
+                        help='Seconds to listen in --listen mode')
     parser.add_argument('--sim', action='store_true',
                         help='Software-only LMS (no FPGA, no serial port)')
 
@@ -613,13 +674,11 @@ if __name__ == '__main__':
 
     if args.listen:
         run_listen(args.port, args.baud, duration=args.listen_time)
-
     elif args.sim:
         if not args.channel:
             parser.error("--sim requires --channel")
         run_sim(args.channel, max_iters=args.max_iters,
                 verbose=not args.quiet, show_eye=args.eye)
-
     else:
         if not args.channel:
             parser.error("FPGA mode requires --channel")
